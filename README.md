@@ -34,6 +34,44 @@ flowchart LR
     A -. shared service layer .-> R
 ```
 
+## Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    actor User
+    participant UI as Streamlit UI
+    participant Loader as PDF Loader / Chunker
+    participant Embed as Embedding API
+    participant VDB as Qdrant
+    participant LLM as Answer Model
+
+    Note over User,LLM: Ingestion Flow
+
+    User->>UI: Upload PDF
+    UI->>UI: Save file to uploads/
+    UI->>Loader: Load PDF text
+    Loader->>Loader: Split text into chunks
+    Loader->>Embed: Embed chunk texts
+    Embed-->>Loader: Chunk vectors
+    Loader->>VDB: Upsert vectors + payloads
+    VDB-->>Loader: Stored successfully
+    Loader-->>UI: Ingestion complete
+    UI-->>User: Show indexed status
+
+    Note over User,LLM: Query Flow
+
+    User->>UI: Ask a question
+    UI->>Embed: Embed question text
+    Embed-->>UI: Query vector
+    UI->>VDB: Search nearest vectors
+    VDB-->>UI: Top matching chunks
+    UI->>LLM: Send system prompt + question + retrieved chunks
+    LLM-->>UI: Generated answer
+    UI-->>User: Display answer + sources
+```
+
 ## Overview
 
 The repository is structured around a small shared service layer:
