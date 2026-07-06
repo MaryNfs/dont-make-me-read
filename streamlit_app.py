@@ -57,7 +57,6 @@ def render_uploaded_files_inventory() -> None:
     else:
         st.caption("No uploaded PDF files found yet.")
 
-
 async def send_rag_ingest_event(pdf_path: Path) -> None:
     client = get_inngest_client()
     await client.send(
@@ -83,14 +82,29 @@ if uploaded is not None:
         else:
             if st.button("Ingest PDF", type="primary"):
                 try:
+                    progress_bar = st.progress(0.0)
+                    progress_status = st.empty()
+                    started_at = time.time()
+
+                    def on_ingestion_progress(progress: float, message: str) -> None:
+                        progress_bar.progress(progress)
+                        elapsed_seconds = time.time() - started_at
+                        progress_status.caption(f"{message} ({elapsed_seconds:.1f}s)")
+
                     with st.spinner("Uploading and triggering ingestion..."):
                         path = save_uploaded_pdf(uploaded)
+                        on_ingestion_progress(0.02, "Saved uploaded file")
                         if use_inngest():
                             asyncio.run(send_rag_ingest_event(path))
                             time.sleep(0.3)
+                            on_ingestion_progress(1.0, "Inngest event sent")
                             status_text = f"Triggered ingestion for: {path.name}"
                         else:
-                            ingested = ingest_pdf(str(path.resolve()), source_id=path.name)
+                            ingested = ingest_pdf(
+                                str(path.resolve()),
+                                source_id=path.name,
+                                progress_callback=on_ingestion_progress,
+                            )
                             status_text = f"Ingested {ingested} chunks from: {path.name}"
                         st.session_state.last_ingested_upload_hash = upload_hash
                     st.success(status_text)

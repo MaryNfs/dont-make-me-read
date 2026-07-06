@@ -1,5 +1,6 @@
 import json
 import time
+from collections.abc import Callable
 from urllib import error, request
 
 from llama_index.readers.file import PDFReader
@@ -21,12 +22,27 @@ load_dotenv()
 
 splitter = SentenceSplitter(chunk_size=1000, chunk_overlap=200)
 
-def load_and_chunk_pdf(path: str):
+ProgressCallback = Callable[[float, str], None]
+
+
+def _emit_progress(callback: ProgressCallback | None, progress: float, message: str) -> None:
+    if callback is not None:
+        callback(progress, message)
+
+
+def load_and_chunk_pdf(path: str, progress_callback: ProgressCallback | None = None):
+    _emit_progress(progress_callback, 0.0, "Loading PDF")
     docs = PDFReader().load_data(file=path)
     texts = [d.text for d in docs if getattr(d, "text", None)]
     chunks = []
-    for t in texts:
+    total_texts = max(len(texts), 1)
+    for index, t in enumerate(texts):
         chunks.extend(splitter.split_text(t))
+        _emit_progress(
+            progress_callback,
+            (index + 1) / total_texts,
+            f"Chunking document content ({index + 1}/{total_texts})",
+        )
     return chunks
 
 
@@ -96,7 +112,11 @@ def _should_fallback_to_single_requests(exc: Exception) -> bool:
     return "HTTP 400" in message or "HTTP 404" in message
 
 
-def _google_embed_texts(texts: list[str], role: str) -> list[list[float]]:
+def _google_embed_texts(
+    texts: list[str],
+    role: str,
+    progress_callback: ProgressCallback | None = None,
+) -> list[list[float]]:
     if not texts:
         return []
 
@@ -113,6 +133,11 @@ def _google_embed_texts(texts: list[str], role: str) -> list[list[float]]:
         embeddings = []
         try:
             for index, batch in enumerate(batches):
+                _emit_progress(
+                    progress_callback,
+                    index / len(batches),
+                    f"Embedding chunks with Google ({index + 1}/{len(batches)})",
+                )
                 payload = {
                     "requests": [
                         {
@@ -142,6 +167,11 @@ def _google_embed_texts(texts: list[str], role: str) -> list[list[float]]:
             embeddings = []
             for index, batch in enumerate(batches):
                 for text in batch:
+                    _emit_progress(
+                        progress_callback,
+                        index / len(batches),
+                        f"Embedding chunks with Google ({index + 1}/{len(batches)})",
+                    )
                     payload = {
                         "taskType": _google_role_to_task_type(role),
                         "content": {
@@ -161,11 +191,17 @@ def _google_embed_texts(texts: list[str], role: str) -> list[list[float]]:
 
         if output_dimensionality != 3072:
             return [_normalize_vector(embedding) for embedding in embeddings]
+        _emit_progress(progress_callback, 1.0, "Embedding complete")
         return embeddings
 
     if model == "gemini-embedding-2":
         embeddings = []
         for index, batch in enumerate(batches):
+            _emit_progress(
+                progress_callback,
+                index / len(batches),
+                f"Embedding chunks with Google ({index + 1}/{len(batches)})",
+            )
             payload = {
                 "requests": [
                     {
@@ -187,6 +223,7 @@ def _google_embed_texts(texts: list[str], role: str) -> list[list[float]]:
             embeddings.extend(_extract_embeddings(response))
             if delay_seconds > 0 and index < len(batches) - 1:
                 time.sleep(delay_seconds)
+        _emit_progress(progress_callback, 1.0, "Embedding complete")
         return embeddings
 
     raise ValueError(
@@ -195,15 +232,21 @@ def _google_embed_texts(texts: list[str], role: str) -> list[list[float]]:
     )
 
 
-def embed_texts(texts: list[str], role: str = "document") -> list[list[float]]:
+def embed_texts(
+    texts: list[str],
+    role: str = "document",
+    progress_callback: ProgressCallback | None = None,
+) -> list[list[float]]:
     provider = get_embedding_provider()
     if provider == "google":
-        return _google_embed_texts(texts, role)
+        return _google_embed_texts(texts, role, progress_callback=progress_callback)
 
+    _emit_progress(progress_callback, 0.0, "Embedding chunks")
     client = get_openai_compatible_client(provider)
     response = client.embeddings.create(
         model=get_embedding_model(),
         input=texts,
         dimensions=get_embedding_dimension(),
     )
+    _emit_progress(progress_callback, 1.0, "Embedding complete")
     return [item.embedding for item in response.data]

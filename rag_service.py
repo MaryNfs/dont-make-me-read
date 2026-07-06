@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from custom_types import RAQQueryResult
@@ -7,13 +8,37 @@ from provider_config import get_llm_model, get_llm_provider, get_openai_compatib
 from vector_db import QdrantStorage
 
 
-def ingest_pdf(pdf_path: str, source_id: str | None = None) -> int:
+ProgressCallback = Callable[[float, str], None]
+
+
+def _emit_progress(callback: ProgressCallback | None, progress: float, message: str) -> None:
+    if callback is not None:
+        callback(progress, message)
+
+
+def ingest_pdf(
+    pdf_path: str,
+    source_id: str | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> int:
     source = source_id or pdf_path
-    chunks = load_and_chunk_pdf(pdf_path)
-    vecs = embed_texts(chunks, role="document")
+    _emit_progress(progress_callback, 0.05, "Preparing ingestion")
+
+    def on_chunk_progress(progress: float, message: str) -> None:
+        _emit_progress(progress_callback, 0.10 + (progress * 0.35), message)
+
+    chunks = load_and_chunk_pdf(pdf_path, progress_callback=on_chunk_progress)
+    _emit_progress(progress_callback, 0.50, f"Created {len(chunks)} chunks")
+
+    def on_embed_progress(progress: float, message: str) -> None:
+        _emit_progress(progress_callback, 0.55 + (progress * 0.30), message)
+
+    vecs = embed_texts(chunks, role="document", progress_callback=on_embed_progress)
+    _emit_progress(progress_callback, 0.90, "Writing vectors to Qdrant")
     ids = [str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{i}")) for i in range(len(chunks))]
     payloads = [{"source": source, "text": chunks[i]} for i in range(len(chunks))]
     QdrantStorage().upsert(ids, vecs, payloads)
+    _emit_progress(progress_callback, 1.0, f"Ingestion complete: {len(chunks)} chunks indexed")
     return len(chunks)
 
 
