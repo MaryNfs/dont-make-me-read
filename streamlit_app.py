@@ -108,7 +108,7 @@ st.divider()
 st.title("Ask a question about your PDFs")
 
 
-async def send_rag_query_event(question: str, top_k: int) -> None:
+async def send_rag_query_event(question: str, top_k: int, answer_style: str) -> None:
     client = get_inngest_client()
     result = await client.send(
         inngest.Event(
@@ -116,6 +116,7 @@ async def send_rag_query_event(question: str, top_k: int) -> None:
             data={
                 "question": question,
                 "top_k": top_k,
+                "answer_style": answer_style,
             },
         )
     )
@@ -156,18 +157,25 @@ def wait_for_run_output(event_id: str, timeout_s: float = 120.0, poll_interval_s
 
 with st.form("rag_query_form"):
     question = st.text_input("Your question")
-    top_k = st.number_input("How many chunks to retrieve", min_value=1, max_value=20, value=5, step=1)
+    answer_style = st.selectbox("Answer style", options=["Detailed", "Balanced", "Concise"], index=0)
+    top_k = st.number_input("How many chunks to retrieve", min_value=1, max_value=20, value=8, step=1)
     submitted = st.form_submit_button("Ask")
 
     if submitted and question.strip():
         with st.spinner("Generating answer..."):
             if use_inngest():
-                event_id = asyncio.run(send_rag_query_event(question.strip(), int(top_k)))
+                event_id = asyncio.run(
+                    send_rag_query_event(question.strip(), int(top_k), answer_style.lower())
+                )
                 output = wait_for_run_output(event_id)
                 answer = output.get("answer", "")
                 sources = output.get("sources", [])
             else:
-                output = answer_question(question.strip(), int(top_k)).model_dump()
+                output = answer_question(
+                    question.strip(),
+                    int(top_k),
+                    answer_style=answer_style.lower(),
+                ).model_dump()
                 answer = output.get("answer", "")
                 sources = output.get("sources", [])
 

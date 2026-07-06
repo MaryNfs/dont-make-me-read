@@ -55,7 +55,8 @@ async def rag_query_pdf_ai(ctx: inngest.Context):
         return RAGSearchResult(contexts=contexts, sources=sources)
 
     def _answer(question: str, found: RAGSearchResult) -> RAQQueryResult:
-        return generate_answer(question, found.contexts, found.sources)
+        answer_style = ctx.event.data.get("answer_style", "detailed")
+        return generate_answer(question, found.contexts, found.sources, answer_style=answer_style)
 
     question = ctx.event.data["question"]
     top_k = int(ctx.event.data.get("top_k", 5))
