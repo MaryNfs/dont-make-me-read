@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from pathlib import Path
 import time
 
@@ -7,15 +8,29 @@ import inngest
 from dotenv import load_dotenv
 import os
 import requests
+from rag_service import (
+    answer_question,
+    get_source_chunk_count,
+    get_total_indexed_chunks,
+    ingest_pdf,
+    list_uploaded_files_with_status,
+)
 
 load_dotenv()
 
 st.set_page_config(page_title="RAG Ingest PDF", page_icon="📄", layout="centered")
 
+if "last_ingested_upload_hash" not in st.session_state:
+    st.session_state.last_ingested_upload_hash = None
+
 
 @st.cache_resource
 def get_inngest_client() -> inngest.Inngest:
     return inngest.Inngest(app_id="rag_app", is_production=False)
+
+
+def use_inngest() -> bool:
+    return os.getenv("USE_INNGEST", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def save_uploaded_pdf(file) -> Path:
@@ -25,6 +40,22 @@ def save_uploaded_pdf(file) -> Path:
     file_bytes = file.getbuffer()
     file_path.write_bytes(file_bytes)
     return file_path
+
+
+def uploaded_file_hash(file) -> str:
+    return hashlib.sha256(file.getbuffer()).hexdigest()
+
+
+def render_uploaded_files_inventory() -> None:
+    st.subheader("Indexed Files")
+    rows = list_uploaded_files_with_status()
+    total_chunks = get_total_indexed_chunks()
+    st.caption(f"Total indexed chunks in Qdrant: {total_chunks}")
+
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No uploaded PDF files found yet.")
 
 
 async def send_rag_ingest_event(pdf_path: Path) -> None:
@@ -44,15 +75,35 @@ st.title("Upload a PDF to Ingest")
 uploaded = st.file_uploader("Choose a PDF", type=["pdf"], accept_multiple_files=False)
 
 if uploaded is not None:
-    with st.spinner("Uploading and triggering ingestion..."):
-        path = save_uploaded_pdf(uploaded)
-        # Kick off the event and block until the send completes
-        asyncio.run(send_rag_ingest_event(path))
-        # Small pause for user feedback continuity
-        time.sleep(0.3)
-    st.success(f"Triggered ingestion for: {path.name}")
-    st.caption("You can upload another PDF if you like.")
+    upload_hash = uploaded_file_hash(uploaded)
+    existing_chunk_count = get_source_chunk_count(uploaded.name)
+    if st.session_state.last_ingested_upload_hash != upload_hash:
+        if existing_chunk_count > 0:
+            st.info(f"{uploaded.name} is already indexed with {existing_chunk_count} chunks.")
+        else:
+            if st.button("Ingest PDF", type="primary"):
+                try:
+                    with st.spinner("Uploading and triggering ingestion..."):
+                        path = save_uploaded_pdf(uploaded)
+                        if use_inngest():
+                            asyncio.run(send_rag_ingest_event(path))
+                            time.sleep(0.3)
+                            status_text = f"Triggered ingestion for: {path.name}"
+                        else:
+                            ingested = ingest_pdf(str(path.resolve()), source_id=path.name)
+                            status_text = f"Ingested {ingested} chunks from: {path.name}"
+                        st.session_state.last_ingested_upload_hash = upload_hash
+                    st.success(status_text)
+                except Exception as exc:
+                    st.error(f"Ingestion failed: {exc}")
+            else:
+                st.caption("Click `Ingest PDF` to process this file.")
+    else:
+        st.info(f"{uploaded.name} is already ingested in this session.")
+    st.caption("Upload a different PDF to ingest new content.")
 
+st.divider()
+render_uploaded_files_inventory()
 st.divider()
 st.title("Ask a question about your PDFs")
 
@@ -109,13 +160,16 @@ with st.form("rag_query_form"):
     submitted = st.form_submit_button("Ask")
 
     if submitted and question.strip():
-        with st.spinner("Sending event and generating answer..."):
-            # Fire-and-forget event to Inngest for observability/workflow
-            event_id = asyncio.run(send_rag_query_event(question.strip(), int(top_k)))
-            # Poll the local Inngest API for the run's output
-            output = wait_for_run_output(event_id)
-            answer = output.get("answer", "")
-            sources = output.get("sources", [])
+        with st.spinner("Generating answer..."):
+            if use_inngest():
+                event_id = asyncio.run(send_rag_query_event(question.strip(), int(top_k)))
+                output = wait_for_run_output(event_id)
+                answer = output.get("answer", "")
+                sources = output.get("sources", [])
+            else:
+                output = answer_question(question.strip(), int(top_k)).model_dump()
+                answer = output.get("answer", "")
+                sources = output.get("sources", [])
 
         st.subheader("Answer")
         st.write(answer or "(No answer)")
@@ -123,4 +177,3 @@ with st.form("rag_query_form"):
             st.caption("Sources")
             for s in sources:
                 st.write(f"- {s}")
-
